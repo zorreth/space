@@ -10,13 +10,13 @@ use axum::{
     routing::any,
 };
 use dashmap::DashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::broadcast;
 
 const CHUNK_SIZE: i32 = 64;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(tag = "type")]
 enum ClientMessage {
     #[serde(rename = "draw")]
@@ -24,6 +24,18 @@ enum ClientMessage {
 
     #[serde(rename = "sub")]
     Sub { chunks: Vec<(i32, i32)> },
+}
+
+impl ClientMessage {
+    fn chunk_coords(x: i32, y: i32) -> (i32, i32) {
+        (x.div_euclid(CHUNK_SIZE), y.div_euclid(CHUNK_SIZE))
+    }
+
+    fn byte_index(x: i32, y: i32) -> usize {
+        let local_x = x.rem_euclid(CHUNK_SIZE);
+        let local_y = y.rem_euclid(CHUNK_SIZE);
+        ((local_y * CHUNK_SIZE + local_x) * 3) as usize
+    }
 }
 
 struct Chunk {
@@ -111,17 +123,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                 match message {
                     ClientMessage::Draw { x, y, color } => {
-                        let chunk_x = x.div_euclid(CHUNK_SIZE);
-                        let chunk_y = y.div_euclid(CHUNK_SIZE);
-
-                        let chunk_coords = (chunk_x, chunk_y);
-
-                        let local_x = x.rem_euclid(CHUNK_SIZE);
-                        let local_y = y.rem_euclid(CHUNK_SIZE);
-
-                        let pixel_index = (local_y * CHUNK_SIZE + local_x) as usize;
-
-                        let byte_index = pixel_index * 3;
+                        let chunk_coords = ClientMessage::chunk_coords(x, y);
+                        let byte_index = ClientMessage::byte_index(x, y);
 
                         if let Some(mut chunk) = state.chunks.get_mut(&chunk_coords) {
                             let r = ((color >> 16) & 0xFF) as u8;
@@ -137,26 +140,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         }
 
                         if let Some(room) = state.rooms.get(&chunk_coords) {
-                            let out_msg = format!(
-                                r#"{{"type":"draw","x":{},"y":{},"color":{}}}"#,
-                                x, y, color
-                            );
-
+                            let out_msg = serde_json::to_string(&message).unwrap();
                             room.value().send(out_msg).ok();
                         }
                     },
                     ClientMessage::Sub { mut chunks } => {
-                        if chunks.len() > 20 {
-                            chunks.truncate(20);
-                        }
+                        chunks.truncate(20);
 
                         active_subs.retain(|active_chunk, handle| {
-                            if chunks.contains(active_chunk) {
-                                true
-                            } else {
-                                handle.abort();
-                                false
-                            }
+                            let keep = chunks.contains(active_chunk);
+                            if !keep { handle.abort(); }
+                            keep
                         });
 
                         for chunk in chunks {
@@ -169,18 +163,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             let tx = tx_outbox.clone();
 
                             let handle = tokio::spawn(async move {
-                                loop {
-                                    match rx.recv().await {
-                                        Ok(result) => {
-                                            if tx.send(result).await.is_err() {
-                                                break;
-                                            }
-                                        },
-                                        Err(broadcast::error::RecvError::Lagged(_)) => {},
-                                        Err(broadcast::error::RecvError::Closed) => {
-                                            break;
-                                        },
-                                    }
+                                while let Ok(result) = rx.recv().await {
+                                    if tx.send(result).await.is_err() { break; }
                                 }
                             });
 
@@ -196,6 +180,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
         }
+    }
+
+    for handle in active_subs.into_values() {
+        handle.abort();
     }
 
     println!("Client disconnected");
