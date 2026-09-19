@@ -4,8 +4,8 @@ CREATE TABLE users (
 );
 
 CREATE TABLE chunks (
-    chunk_x INT NOT NULL,
-    chunk_y INT NOT NULL,
+    chunk_x BIGINT NOT NULL,
+    chunk_y BIGINT NOT NULL,
     colors_data BYTEA NOT NULL,
     author_ids_data BYTEA NOT NULL,
     timestamps_data BYTEA NOT NULL,

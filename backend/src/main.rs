@@ -37,6 +37,8 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+async fn get_chunks() {}
+
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|socket| websocket(socket, state))
 }
